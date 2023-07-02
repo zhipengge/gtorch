@@ -18,7 +18,7 @@ import time
 import cv2
 import PIL.Image
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 class DataLoaderX(DataLoader):
     def __iter__(self):
