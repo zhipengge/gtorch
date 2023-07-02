@@ -1,3 +1,9 @@
-.idea/
 .vscode/
-checkpoints/
+.idea/
+*.pyc
+*.pyo
+*.so
+*.a
+*.o
+*.so
+output/

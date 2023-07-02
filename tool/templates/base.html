@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" integrity="sha384-xOolHFLEh07PJGoPkLv1IbcEPTNtaed2xpHsD9ESMhqIYd0nLMwNLD69Npy4HI+N" crossorigin="anonymous">
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js" integrity="sha384-DfXdz2htPH0lsSSs5nCTpuj/zy4C+OGpamoFVy38MVBnE+IbbVYUew+OrCXaRkfj" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-7ymO4nGrkm372HoSbq1OY2DP4pEZnMiA+E0F3zPr+JQQtQ82gQ1HPY3QIVtztVua" crossorigin="anonymous"></script>
+
+    <title>{% block title %}{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css')}}">
+    <script type="text/javascript" src="{{url_for('static', filename='js/base.js')}}"></script>
+    {% block head %}{% endblock %}
+</head>
+<body style="font-size: 12px;background-color: #30303030">
+    <div class="nav">
+        <div class="nav-content">
+            <a href="{{ url_for('index') }}"><img src="{{ url_for('static', filename='image/logo.png')}}" alt="" class="nav-logo"></a>
+            <div class="left-part">
+                <div class="nav-item">
+                    <span class="item-name">
+                        <a href="{{ url_for('index') }}" class="{% if active == 'index' %}active{% endif %}">首页</a>
+                    </span>
+                    <span class="nav-space"></span>
+                </div>
+                <div class="nav-item">
+                    <span class="item-name">
+                        <a href="{{ url_for('analyse') }}" class="{% if active == 'analyse' %}active{% endif %}">分析</a>
+                    </span>
+                    <span class="nav-space"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="body-base">
+        <hr>
+        {% block main %}{% endblock %}
+    </div>
+</body>
+</html>
