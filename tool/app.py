@@ -9,8 +9,8 @@ from functools import wraps
 import os
 import config
 import sys
-sys.path.append(os.getcwd())
-import src.utils as utils
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from src.utils import utils
 
 acvite = "index"
 file_tree = {}
@@ -32,6 +32,7 @@ def update_output_file_tree(func):
     return wrapper
 
 app = Flask(__name__)
+app.config.from_object(config)
 
 @app.route("/")
 @update_active
@@ -45,4 +46,4 @@ def analyse():
     return render_template("analyse.html", active=active, file_tree=file_tree)
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8000)
+    app.run(debug=True, port=8000, host=config.HOST)

@@ -7,10 +7,14 @@
 import time
 import os
 import json
+import torchvision.transforms as transforms
 
 
 def get_current_time_str():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+def get_current_time_str_simple():
+    return time.strftime("%Y%m%d%H%M%S", time.localtime())
 
 def get_current_timestamp_ms():
     return int(round(time.time() * 1000))
@@ -39,6 +43,17 @@ def get_file_tree(root_dir):
     root = os.path.relpath(root_dir, base_dir)
     change_folder_to_file_tree(tmp_map, file_tree, root)
     return file_tree
+
+
+def get_transforms(transforms_config):
+    transforms.Resize
+    transforms_list = []
+    for transform_config in transforms_config:
+        name = transform_config["name"]
+        args = transform_config["args"]
+        transform = getattr(transforms, name)(**args)
+        transforms_list.append(transform)
+    return transforms.Compose(transforms_list)
 
 def print_dict(dct, indent=4):
     print(json.dumps(dct, sort_keys=False, indent=indent))

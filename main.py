@@ -5,116 +5,147 @@
 @file: main.py
 @brief: main
 """
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from  torch.utils.data import DataLoader
-import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 import glob
-from prefetch_generator import BackgroundGenerator
 import time
-import cv2
-import PIL.Image
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+import argparse
+import importlib
+from src.utils import utils
 
-class DataLoaderX(DataLoader):
-    def __iter__(self):
-        return BackgroundGenerator(super().__iter__())
+def parse_args():
+    parser = argparse.ArgumentParser(description='PyTorch Training')
+    parser.add_argument('--config_path', type=str, default="config/17flowers_resnet18.py", help="config path")
+    parser.add_argument('--local_rank', type=int, default=0, help="local rank")
+    args = parser.parse_args()
+    return args
 
-# define data preprocessing
-data_transform = transforms.Compose([
-  transforms.Resize(256),
-  transforms.CenterCrop(224),
-  transforms.ToTensor(),
-  transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+def init_state():
+    args = parse_args()
+    config_path = args.config_path
+    assert os.path.exists(config_path), f"config path: {config_path} not exists"
+    config_spec = importlib.util.spec_from_file_location("config", config_path)
+    config_module = importlib.util.module_from_spec(config_spec)
+    config_spec.loader.exec_module(config_module)
+    config = config_module.config
+    torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+    torch.backends.cudnn.deterministic = True
+    torch.distributed.init_process_group(
+        backend="nccl",                       # communication backend
+        world_size=torch.cuda.device_count(), # number of processes: gpus num in current node
+        rank=args.local_rank,                 # rank of the current process: local_rank in current node
+    )
+    torch.cuda.set_device(args.local_rank)
+    return config, args
 
-batch_size = 128
-num_workers = 8
+def train(config, args):
+    checkpoint_dir_base = config.CHECKPOINT_DIR
+    model_config = config.MODEL_CONFIG
+    model_name = model_config['name']
+    train_transforms = utils.get_transforms(config.TRANSFORMS['train'])
+    val_transforms = utils.get_transforms(config.TRANSFORMS['val'])
+    train_set = datasets.ImageFolder(root=os.path.join(config.DATA_DIR, 'train'), transform=train_transforms)
+    val_set = datasets.ImageFolder(root=os.path.join(config.DATA_DIR, 'val'), transform=val_transforms)
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_set)
+    val_sampler = torch.utils.data.distributed.DistributedSampler(val_set)
+    train_loader = DataLoader(train_set, batch_size=config.BATCH_SIZE, sampler=train_sampler, num_workers=config.NUM_WORKERS)
+    val_loader = DataLoader(val_set, batch_size=config.BATCH_SIZE, sampler=val_sampler, num_workers=config.NUM_WORKERS)
+    if model_name == 'resnet18':
+        model = models.resnet18(weights=model_config['weights'])
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(num_ftrs, model_config['num_classes'])
+    else:
+        raise NotImplementedError
+    model = torch.nn.parallel.DistributedDataParallel(model.cuda(args.local_rank), device_ids=[args.local_rank])
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    total_steps = len(train_loader)
+    start_num_epoch = 0
+    checkpoint_dir = None
+    checkpoint_path = None
+    if config.RESUME:
+        saved_models = glob.glob(os.path.join(checkpoint_dir_base, f"{os.path.basename(config.DATA_DIR)}_{model_name}_*", 'model_*.ckpt'))
+        if len(saved_models) > 0:
+            saved_models.sort()
+            checkpoint_path = saved_models[-1]
+            checkpoint_dir = os.path.dirname(checkpoint_path)
+    if checkpoint_dir is None:
+        checkpoint_dir = os.path.join(
+            checkpoint_dir_base, 
+            "{}_{}_{}".format(
+                os.path.basename(config.DATA_DIR),
+                model_name,
+                utils.get_current_time_str_simple()
+            ))
+        os.makedirs(checkpoint_dir, exist_ok=True)
+    if checkpoint_path is not None:
+        # start_num_epoch = int(checkpoint_path.split('_')[-1].split('.')[0])
+        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cuda:0'))
+        model.module.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print('load model from: ', checkpoint_path)
+        start_num_epoch = checkpoint['epoch'] + 1
+    else:
+        print('train from scratch')
+        start_num_epoch = 0
+    num_steps_to_show = 10
+    
+    for epoch in range(start_num_epoch, config.NUM_EPOCHS):
+        t0 = time.time()
+        model.train()
+        for i, (images, labels) in enumerate(train_loader):
+            images = images.cuda(non_blocking=True)
+            labels = labels.cuda(non_blocking=True)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            if (i+1) % num_steps_to_show == 0 and args.local_rank == 0:
+                print('RANK {}: Epoch [{}/{}], Step [{}/{}], Loss: {:.4f} | {:.3f} images/s | {:.2f}s/iter'.format(
+                    args.local_rank,
+                    epoch+1, 
+                    config.NUM_EPOCHS, 
+                    i+1, 
+                    total_steps, 
+                    loss.item(), 
+                    num_steps_to_show * config.BATCH_SIZE / (time.time() - t0 + 1e-6), 
+                    (time.time() - t0) / num_steps_to_show))
+                t0 = time.time()
+        if args.local_rank == 0:
+            model.eval()
+            with torch.no_grad():
+                correct = 0
+                total = 0
+                for images, labels in val_loader:
+                    images = images.cuda(non_blocking=True)
+                    labels = labels.cuda(non_blocking=True)
+                    outputs = model(images)
+                    _, predicted = torch.max(outputs.data, 1)
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
+                acc = correct / total
+                print('Accuracy of the model on the {} validation images: {:.3f} %'.format(total, 100 * acc))
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.module.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss.item(),
+            }, os.path.join(checkpoint_dir, 'model_{}.ckpt'.format(str(epoch).zfill(len(str(config.NUM_EPOCHS))))))
 
-# load data
-train_set = datasets.ImageFolder(root='/media/gezhipeng/nas2t/datasets/imagenet/train', transform=data_transform)
-val_set = datasets.ImageFolder(root='/media/gezhipeng/nas2t/datasets/imagenet/val', transform=data_transform)
+def main():
+    config, args = init_state()
+    train(config, args)
 
-# define data loader
-train_loader = DataLoaderX(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-val_loader = DataLoaderX(val_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-def next_batch(data_loader):
-  while True:
-    for data in data_loader:
-      yield data
-
-# load pre-trained model
-model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-
-# # modify last layer for new task
-# num_ftrs = model.fc.in_features
-# model.fc = nn.Linear(num_ftrs, 1000)
-
-# define loss function and optimizer
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
-
-# move model to GPU
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-model.to(device)
-num_steps_to_show = 10
-# train model
-num_epochs = 10
-total_steps = len(train_loader)
-start_num_epoch = 0
-saved_models = glob.glob('checkpoints/resnet18_model_*.ckpt')
-if len(saved_models) > 0:
-  saved_models.sort()
-  start_num_epoch = int(saved_models[-1].split('_')[-1].split('.')[0])
-  model.load_state_dict(torch.load(saved_models[-1]))
-  print('load model from: ', saved_models[-1])
-  start_num_epoch += 1
-else:
-  print('train from scratch')
-  start_num_epoch = 0
-for epoch in range(start_num_epoch, num_epochs):
-  t0 = time.time()
-  for i, (images, labels) in enumerate(train_loader):
-    # move images and labels to GPU
-    images = images.to(device)
-    labels = labels.to(device)
-
-    # forward pass
-    outputs = model(images)
-    loss = criterion(outputs, labels)
-
-    # backward pass and optimize
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    # print loss every 100 steps
-    if (i+1) % num_steps_to_show == 0:
-      print('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f} | {:.3f} images/s | {:.2f}s/iter'.format(
-        epoch+1, 
-        num_epochs, 
-        i+1, 
-        total_steps, 
-        loss.item(), 
-        num_steps_to_show * batch_size / (time.time() - t0 + 1e-6), 
-        (time.time() - t0) / num_steps_to_show))
-      t0 = time.time()
-  torch.save(model.state_dict(), f'checkpoints/resnet18_model_{str(epoch).zfill(len(str(num_epochs)))}.ckpt')
-
-# validate model
-model.eval()
-with torch.no_grad():
-  correct = 0
-  total = 0
-  for images, labels in val_loader:
-    images = images.to(device)
-    labels = labels.to(device)
-    outputs = model(images)
-    _, predicted = torch.max(outputs.data, 1)
-    total += labels.size(0)
-    correct += (predicted == labels).sum().item()
-  print('Accuracy of the model on the 10000 validation images: {} %'.format(100 * correct / total))
+if __name__ == "__main__":
+    main()

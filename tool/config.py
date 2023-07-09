@@ -5,5 +5,6 @@
 @brief: config
 """
 output_dir = "tool/static/output"
+HOST = "0.0.0.0"
 
 DEBUG = True
