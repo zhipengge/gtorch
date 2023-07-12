@@ -7,9 +7,9 @@
 from config.base import BaseConfig
 
 config = BaseConfig(
-    BATCH_SIZE=64,
+    BATCH_SIZE=128,
     NUM_WORKERS=8,
-    NUM_EPOCHS=50,
+    NUM_EPOCHS=70,
     CHECKPOINT_DIR='output/checkpoints',
     DATA_DIR='/home/gezhipeng/mnt1/dataset/17flowers',
     GPUS='0',

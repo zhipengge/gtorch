@@ -21,6 +21,7 @@ class BaseConfig():
         self.TRANSFORMS = kwargs.get('TRANSFORMS', {})
         self.NUM_STEPS_TO_DISPLAY = kwargs.get('NUM_STEPS_TO_DISPLAY', 10)
         self.RESUME = kwargs.get('RESUME', False)
+        self.SEED = kwargs.get('SEED', 42)
     
     def __repr__(self) -> str:
         ss = f" {self.__class__.__name__} ".center(100, '*')

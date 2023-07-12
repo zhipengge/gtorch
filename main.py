@@ -17,35 +17,104 @@ import torchvision.models as models
 import glob
 import time
 import os
+import numpy as np
 import argparse
 import importlib
 from src.utils import utils
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+import logging
+from functools import wraps
+logging.getLogger().setLevel(logging.INFO)
+from PIL import Image
+import torch.nn.functional as F
 
+def log_fun(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        logging.info(f"{' ' + 'start ' + func.__name__ + ' ':=^100}")
+        res = func(*args, **kwargs)
+        logging.info(f"{' ' + 'end ' + func.__name__ + ' ':=^100}")
+        return res
+    return wrapper
+
+
+@log_fun
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch Training')
     parser.add_argument('--config_path', type=str, default="config/17flowers_resnet18.py", help="config path")
-    parser.add_argument('--local_rank', type=int, default=0, help="local rank")
+    parser.add_argument('--local_rank', type=int, default=-1, help="local rank")
+    parser.add_argument('--test', action='store_true', help="test")
+    parser.add_argument('--input', nargs='+', help='A list of space separated input images'
+                        'or a single glob pattern such as "directory/*.jpg"')
+    parser.add_argument('--checkpoint', type=str, help='checkpoint path')
     args = parser.parse_args()
     return args
 
-def init_state():
-    args = parse_args()
+
+def init_state(args, train=True):
     config_path = args.config_path
     assert os.path.exists(config_path), f"config path: {config_path} not exists"
     config_spec = importlib.util.spec_from_file_location("config", config_path)
     config_module = importlib.util.module_from_spec(config_spec)
     config_spec.loader.exec_module(config_module)
     config = config_module.config
-    torch.manual_seed(0)
-    torch.cuda.manual_seed_all(0)
+    if not train:
+        return config
+    torch.manual_seed(config.SEED)
+    torch.cuda.manual_seed_all(config.SEED)
     torch.backends.cudnn.deterministic = True
-    torch.distributed.init_process_group(
+    dist.init_process_group(
         backend="nccl",                       # communication backend
         world_size=torch.cuda.device_count(), # number of processes: gpus num in current node
         rank=args.local_rank,                 # rank of the current process: local_rank in current node
     )
     torch.cuda.set_device(args.local_rank)
-    return config, args
+    return config
+
+@log_fun
+def get_model(config, args):
+    model_config = config.MODEL_CONFIG
+    model_name = model_config['name']
+    if model_name == 'resnet18':
+        model = models.resnet18(weights=model_config['weights'])
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(num_ftrs, model_config['num_classes'])
+    else:
+        raise NotImplementedError
+    if not args.test:
+        return model.to(args.local_rank)
+    else:
+        return model.to(device=0)
+
+@log_fun
+def get_latest_checkpoint_path(config, resume=False):
+    if not resume:
+        return None
+    model_config = config.MODEL_CONFIG
+    model_name = model_config['name']
+    checkpoint_dirs = glob.glob(os.path.join(config.CHECKPOINT_DIR, f"{os.path.basename(config.DATA_DIR)}_{model_name}_*"))
+    if len(checkpoint_dirs) > 0:
+        checkpoint_dirs.sort()
+        chekpoint_dir = checkpoint_dirs[-1]
+        saved_models = glob.glob(os.path.join(chekpoint_dir, 'model_*.ckpt'))
+        if len(saved_models) == 0:
+            logging.warning(f"no checkpoint found in {chekpoint_dir}")
+            return None
+        else:
+            saved_models.sort()
+            checkpoint_path = saved_models[-1]
+            logging.info(f"load model from: {checkpoint_path}")
+            return checkpoint_path
+    else:
+        logging.warning(f"no checkpoint dir found in {config.CHECKPOINT_DIR}")
+        return None
+
+@log_fun
+def load_state_dict(checkpoint_path):
+    checkpoint = torch.load(checkpoint_path)
+    return checkpoint
+
 
 def train(config, args):
     checkpoint_dir_base = config.CHECKPOINT_DIR
@@ -56,29 +125,23 @@ def train(config, args):
     train_set = datasets.ImageFolder(root=os.path.join(config.DATA_DIR, 'train'), transform=train_transforms)
     val_set = datasets.ImageFolder(root=os.path.join(config.DATA_DIR, 'val'), transform=val_transforms)
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_set)
-    val_sampler = torch.utils.data.distributed.DistributedSampler(val_set)
     train_loader = DataLoader(train_set, batch_size=config.BATCH_SIZE, sampler=train_sampler, num_workers=config.NUM_WORKERS)
-    val_loader = DataLoader(val_set, batch_size=config.BATCH_SIZE, sampler=val_sampler, num_workers=config.NUM_WORKERS)
-    if model_name == 'resnet18':
-        model = models.resnet18(weights=model_config['weights'])
-        num_ftrs = model.fc.in_features
-        model.fc = nn.Linear(num_ftrs, model_config['num_classes'])
-    else:
-        raise NotImplementedError
-    model = torch.nn.parallel.DistributedDataParallel(model.cuda(args.local_rank), device_ids=[args.local_rank])
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
-    total_steps = len(train_loader)
+    val_loader = DataLoader(val_set, batch_size=config.BATCH_SIZE, num_workers=config.NUM_WORKERS)
+    model = get_model(config, args)
+
     start_num_epoch = 0
+    checkpoint = None
     checkpoint_dir = None
-    checkpoint_path = None
-    if config.RESUME:
-        saved_models = glob.glob(os.path.join(checkpoint_dir_base, f"{os.path.basename(config.DATA_DIR)}_{model_name}_*", 'model_*.ckpt'))
-        if len(saved_models) > 0:
-            saved_models.sort()
-            checkpoint_path = saved_models[-1]
-            checkpoint_dir = os.path.dirname(checkpoint_path)
-    if checkpoint_dir is None:
+    resume_path = get_latest_checkpoint_path(config, config.RESUME)
+    if resume_path:
+        if dist.get_rank() == 0:
+            checkpoint_dir = os.path.dirname(resume_path)
+            checkpoint = load_state_dict(resume_path)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            start_num_epoch = checkpoint['epoch'] + 1
+            checkpoint_dir = os.path.dirname(resume_path)
+    elif dist.get_rank() == 0:
+        logging.info(f"train from scratch")
         checkpoint_dir = os.path.join(
             checkpoint_dir_base, 
             "{}_{}_{}".format(
@@ -87,18 +150,13 @@ def train(config, args):
                 utils.get_current_time_str_simple()
             ))
         os.makedirs(checkpoint_dir, exist_ok=True)
-    if checkpoint_path is not None:
-        # start_num_epoch = int(checkpoint_path.split('_')[-1].split('.')[0])
-        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cuda:0'))
-        model.module.load_state_dict(checkpoint['model_state_dict'])
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank)
+    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    if checkpoint is not None and "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        print('load model from: ', checkpoint_path)
-        start_num_epoch = checkpoint['epoch'] + 1
-    else:
-        print('train from scratch')
-        start_num_epoch = 0
+    criterion = nn.CrossEntropyLoss()
+    total_steps = len(train_loader)
     num_steps_to_show = 10
-    
     for epoch in range(start_num_epoch, config.NUM_EPOCHS):
         t0 = time.time()
         model.train()
@@ -121,7 +179,7 @@ def train(config, args):
                     num_steps_to_show * config.BATCH_SIZE / (time.time() - t0 + 1e-6), 
                     (time.time() - t0) / num_steps_to_show))
                 t0 = time.time()
-        if args.local_rank == 0:
+        if dist.get_rank() == 0:
             model.eval()
             with torch.no_grad():
                 correct = 0
@@ -142,9 +200,36 @@ def train(config, args):
                 'loss': loss.item(),
             }, os.path.join(checkpoint_dir, 'model_{}.ckpt'.format(str(epoch).zfill(len(str(config.NUM_EPOCHS))))))
 
+def test(config, args):
+    checkpoint_path = args.checkpoint
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"checkpoint path: {checkpoint_path} not exists")
+    model_config = config.MODEL_CONFIG
+    model_name = model_config['name']
+    model = get_model(config, args)
+    checkpoint = load_state_dict(checkpoint_path)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    transform = utils.get_transforms(config.TRANSFORMS['val'])
+    for img_path in args.input:
+        img = utils.load_image(img_path)
+        img_pil = Image.fromarray(img)
+        tensor = transform(img_pil).unsqueeze(0).cuda(0)
+        model.eval()
+        with torch.no_grad():
+            outputs = model(tensor)
+            confidence_distribution = F.softmax(outputs, dim=-1)
+            score, predicted = torch.max(confidence_distribution, 1)
+            print(f"img_path: {img_path}, predicted: {predicted.item()}, confidence: {score.item():.2f}")
+
+
 def main():
-    config, args = init_state()
-    train(config, args)
+    args = parse_args()
+    if args.test:
+        config = init_state(args, train=False)
+        test(config, args)
+    else:
+        config = init_state(args, train=True)
+        train(config, args)
 
 
 if __name__ == "__main__":

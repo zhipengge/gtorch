@@ -8,6 +8,7 @@ import time
 import os
 import json
 import torchvision.transforms as transforms
+import cv2
 
 
 def get_current_time_str():
@@ -57,6 +58,21 @@ def get_transforms(transforms_config):
 
 def print_dict(dct, indent=4):
     print(json.dumps(dct, sort_keys=False, indent=indent))
+
+
+def load_image(image_path, RGB=False):
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"{image_path} not found")
+    img = cv2.imread(image_path)
+    if RGB:
+        return img[:, :, ::-1]
+    return img
+
+def resize_image(img, size):
+    return cv2.resize(img, size)
+
+def to_tensor(img):
+    return transforms.ToTensor()(img)
 
 if __name__ == "__main__":
     # print(get_current_time_str())
