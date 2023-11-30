@@ -7,14 +7,14 @@
 from config.base import BaseConfig
 
 config = BaseConfig(
-    BATCH_SIZE=256,
+    BATCH_SIZE=128,
     NUM_WORKERS=8,
     NUM_EPOCHS=70,
     CHECKPOINT_DIR='output/checkpoints',
     DATA_DIR='/home/gezhipeng/mnt1/dataset/17flowers',
     GPUS='0',
     MODEL_CONFIG={
-        'name': 'resnet18',
+        'name': 'resnet50',
         'weights': 'IMAGENET1K_V1',
         'pretrained': True,
         'num_classes': 17

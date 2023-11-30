@@ -28,6 +28,8 @@ from functools import wraps
 logging.getLogger().setLevel(logging.INFO)
 from PIL import Image
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 def log_fun(func):
     @wraps(func)
@@ -78,6 +80,10 @@ def get_model(config, args):
     model_name = model_config['name']
     if model_name == 'resnet18':
         model = models.resnet18(weights=model_config['weights'])
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(num_ftrs, model_config['num_classes'])
+    elif model_name == "resnet50":
+        model = models.resnet50(weights=model_config['weights'])
         num_ftrs = model.fc.in_features
         model.fc = nn.Linear(num_ftrs, model_config['num_classes'])
     else:
@@ -151,16 +157,20 @@ def train(config, args):
             ))
         os.makedirs(checkpoint_dir, exist_ok=True)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank)
-    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    writer = SummaryWriter(f"{checkpoint_dir}/logs")
+    # optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999))
+    # scheduler = StepLR(optimizer, step_size=5, gamma=0.8)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, verbose=True)
     if checkpoint is not None and "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     criterion = nn.CrossEntropyLoss()
     total_steps = len(train_loader)
-    num_steps_to_show = 10
+    num_steps_to_show = 1
     for epoch in range(start_num_epoch, config.NUM_EPOCHS):
-        t0 = time.time()
         model.train()
         for i, (images, labels) in enumerate(train_loader):
+            t0 = time.time()
             images = images.cuda(non_blocking=True)
             labels = labels.cuda(non_blocking=True)
             outputs = model(images)
@@ -168,6 +178,9 @@ def train(config, args):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            writer.add_scalar("loss", loss.item(), len(train_loader) * epoch + i)
+            writer.add_scalar("lr", optimizer.param_groups[0]['lr'], len(train_loader) * epoch + i)
+            t1 = time.time()
             if (i+1) % num_steps_to_show == 0 and args.local_rank == 0:
                 print('RANK {}: Epoch [{}/{}], Step [{}/{}], Loss: {:.4f} | {:.3f} images/s | {:.2f}s/iter'.format(
                     args.local_rank,
@@ -176,14 +189,14 @@ def train(config, args):
                     i+1, 
                     total_steps, 
                     loss.item(), 
-                    num_steps_to_show * config.BATCH_SIZE / (time.time() - t0 + 1e-6), 
-                    (time.time() - t0) / num_steps_to_show))
-                t0 = time.time()
+                    len(images) / (time.time() - t0 + 1e-6), 
+                    t1 - t0))
         if dist.get_rank() == 0:
             model.eval()
             with torch.no_grad():
                 correct = 0
                 total = 0
+                val_loss_scalar = 0.0
                 for images, labels in val_loader:
                     images = images.cuda(non_blocking=True)
                     labels = labels.cuda(non_blocking=True)
@@ -191,6 +204,10 @@ def train(config, args):
                     _, predicted = torch.max(outputs.data, 1)
                     total += labels.size(0)
                     correct += (predicted == labels).sum().item()
+
+                    val_loss = criterion(outputs, labels)
+                    val_loss_scalar += val_loss.item()
+                scheduler.step(val_loss_scalar / len(val_loader))
                 acc = correct / total
                 print('Accuracy of the model on the {} validation images: {:.3f} %'.format(total, 100 * acc))
             torch.save({
@@ -198,7 +215,10 @@ def train(config, args):
                 'model_state_dict': model.module.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': loss.item(),
-            }, os.path.join(checkpoint_dir, 'model_{}.ckpt'.format(str(epoch).zfill(len(str(config.NUM_EPOCHS))))))
+            }, os.path.join(checkpoint_dir, 'model_{}.ckpt'.format(str(epoch + 1).zfill(len(str(config.NUM_EPOCHS))))))
+            
+        # scheduler.step()
+    writer.close()
 
 def test(config, args):
     checkpoint_path = args.checkpoint
@@ -230,6 +250,7 @@ def main():
     else:
         config = init_state(args, train=True)
         train(config, args)
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
