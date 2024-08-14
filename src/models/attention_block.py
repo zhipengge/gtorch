@@ -9,31 +9,33 @@ import torch
 import torch.nn as nn
 import math
 
+
 class SEBlock(nn.Module):
     def __init__(self, channel, divisor=16):
         super(SEBlock, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
-                nn.Conv2d(channel, channel // divisor, 1, 1, 0, bias=False),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(channel // divisor, channel, 1, 1, 0, bias=False),
-                nn.Sigmoid()
+            nn.Conv2d(channel, channel // divisor, 1, 1, 0, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channel // divisor, channel, 1, 1, 0, bias=False),
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
         y = self.avg_pool(x)
         y = self.fc(y)
         return x * y
-    
+
+
 class ChannelAttention(nn.Module):
     def __init__(self, channel, divisor=8):
         super(ChannelAttention, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
 
-        self.fc1   = nn.Conv2d(channel, channel // divisor, 1, bias=False)
+        self.fc1 = nn.Conv2d(channel, channel // divisor, 1, bias=False)
         self.relu1 = nn.ReLU()
-        self.fc2   = nn.Conv2d(channel // divisor, channel, 1, bias=False)
+        self.fc2 = nn.Conv2d(channel // divisor, channel, 1, bias=False)
 
         self.sigmoid = nn.Sigmoid()
 
@@ -43,11 +45,12 @@ class ChannelAttention(nn.Module):
         out = avg_out + max_out
         return self.sigmoid(out)
 
+
 class SpatialAttention(nn.Module):
     def __init__(self, kernel_size=7):
         super(SpatialAttention, self).__init__()
 
-        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        assert kernel_size in (3, 7), "kernel size must be 3 or 7"
         padding = 3 if kernel_size == 7 else 1
         self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
         self.sigmoid = nn.Sigmoid()
@@ -59,6 +62,7 @@ class SpatialAttention(nn.Module):
         x = self.conv1(x)
         return self.sigmoid(x)
 
+
 class CBAMBlock(nn.Module):
     def __init__(self, channel, divisor=8, kernel_size=7):
         super(CBAMBlock, self).__init__()
@@ -69,16 +73,12 @@ class CBAMBlock(nn.Module):
         x = x * self.channelattention(x)
         x = x * self.spatialattention(x)
         return x
-    
+
 
 class SelfAttention(nn.Module):
     def __init__(self):
         super(SelfAttention, self).__init__()
-        
 
-
-
-    
 
 if __name__ == "__main__":
     x = torch.rand(2, 16, 32, 32)
@@ -88,4 +88,3 @@ if __name__ == "__main__":
     cbam_block = CBAMBlock(16)
     y2 = cbam_block(x)
     print(y2.shape)
-

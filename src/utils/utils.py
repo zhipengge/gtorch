@@ -14,11 +14,14 @@ import cv2
 def get_current_time_str():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
+
 def get_current_time_str_simple():
     return time.strftime("%Y%m%d%H%M%S", time.localtime())
 
+
 def get_current_timestamp_ms():
     return int(round(time.time() * 1000))
+
 
 def change_folder_to_file_tree(dir_map, file_tree, root):
     root_name = os.path.basename(root)
@@ -27,7 +30,10 @@ def change_folder_to_file_tree(dir_map, file_tree, root):
         dir_path = os.path.join(root, dir_)
         if dir_path in dir_map:
             file_tree[root_name]["dirs"][i] = {dir_: {}}
-            change_folder_to_file_tree(dir_map, file_tree[root_name]["dirs"][i], dir_path)
+            change_folder_to_file_tree(
+                dir_map, file_tree[root_name]["dirs"][i], dir_path
+            )
+
 
 def get_file_tree(root_dir):
     """
@@ -56,6 +62,7 @@ def get_transforms(transforms_config):
         transforms_list.append(transform)
     return transforms.Compose(transforms_list)
 
+
 def print_dict(dct, indent=4):
     print(json.dumps(dct, sort_keys=False, indent=indent))
 
@@ -68,11 +75,14 @@ def load_image(image_path, RGB=False):
         return img[:, :, ::-1]
     return img
 
+
 def resize_image(img, size):
     return cv2.resize(img, size)
 
+
 def to_tensor(img):
     return transforms.ToTensor()(img)
+
 
 if __name__ == "__main__":
     # print(get_current_time_str())
